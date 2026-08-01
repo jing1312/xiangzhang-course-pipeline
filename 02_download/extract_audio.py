@@ -6,11 +6,11 @@
 通过 Referer 头携带来源页面地址（视频直链需携带 Referer 才可下载）。
 
 用法：
-    python extract_audio.py --dir "D:\\文档\\课程视频\\临床药理学" \
+    python extract_audio.py --dir ./downloads/临床药理学 \
         --out transcripts/audio --ffmpeg ffmpeg \
         --referer "https://zbkt.ncu.edu.cn/TeachingCenterStudentWeb/index.html"
     # 只处理部分文件：
-    python extract_audio.py --dir "D:\\文档\\课程视频" --filter "临床药理学"
+    python extract_audio.py --dir ./downloads --filter "临床药理学"
 """
 import argparse
 import os

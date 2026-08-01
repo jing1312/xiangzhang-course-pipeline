@@ -10,7 +10,7 @@
     简称_01_课程名_2026 03 02 13 48 00.mp4
 
 用法：
-    python rename_videos.py --dir "D:\\文档\\课程视频" \
+    python rename_videos.py --dir ./downloads \
         --short-names '{"临床药理学":"临床药理","生物药剂与药物动力学":"生物药剂","天然药物化学":"天然药化"}'
 """
 import argparse

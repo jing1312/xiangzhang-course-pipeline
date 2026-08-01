@@ -8,7 +8,7 @@
   - rename_videos.py：直接改成「简称_序号_课程名_时间」标准格式
 
 用法：
-    python add_prefix.py --dir "D:\\文档\\课程视频" \
+    python add_prefix.py --dir ./downloads \
         --short-names '{"临床药理学":"临床药理"}'
 """
 import argparse
