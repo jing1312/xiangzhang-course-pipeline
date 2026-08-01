@@ -39,6 +39,7 @@ xiangzhang-course-pipeline/
 ├── config.example.json     # 配置模板（复制为 config.json 后填写）
 ├── requirements.txt        # Python 依赖（requests）
 ├── 01_links/               # 阶段 1：链接提取
+│   ├── collect_course_items.cjs    # 课程列表采集：实录列表页 → video-items.json（分课程）
 │   ├── collect_media_details.cjs   # 主脚本：抓详情、选最优视角/声道 → media-manifest.json
 │   ├── rebuild_fresh_manifest.cjs  # 直链过期后刷新清单（连 CDP 重新抓）
 │   ├── export_fresh_media_urls.cjs # manifest → all_fresh_media_urls.csv（10 列，带 BOM）
@@ -114,7 +115,29 @@ msedge --remote-debugging-port=9222 --user-data-dir=%LOCALAPPDATA%\edge-debug-pr
 
 在打开的浏览器里登录教学平台（建议勾选「记住我」），之后保持浏览器开着。
 
-### 1.2 抓取详情（collect_media_details.cjs）
+### 1.2 采集课程列表（collect_course_items.cjs）
+
+从「教师课程实录列表页」按课程抓取全部实录项，生成下游脚本的
+`downloads_by_course/<课程>/video-items.json` 和 `urls.txt`：
+
+```bash
+node 01_links/collect_course_items.cjs --config config.json --cdp
+```
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `--config=` | `config.json` | 配置文件路径 |
+| `--courses=` | 配置里的 courses | 逗号分隔的课程名（与平台课程目录一致，支持部分匹配） |
+| `--cdp` | 关 | 连接 9222 调试浏览器（带登录态，推荐） |
+| `--all` | 关 | 额外把**全部课程**的实录项合并写入 `collected-video-items.json` |
+| `--out=` | `collected-video-items.json` | `--all` 时的合并清单输出路径 |
+
+原理：打开实录列表页读取 Vue 组件内配置（`teachingApi`/`validCode`/`weeklyList`
+课程表/学期），逐个课程调 `POST {teachingApi}/v1/videoinfos/page?validCode=...`
+（`groupIds=课程班级、week=null`）翻页拉全，按上课时间排序后落盘。
+课程列表页也是登录态的入口，需要在调试浏览器里已打开过平台。
+
+### 1.3 抓取详情（collect_media_details.cjs）
 
 ```bash
 node 01_links/collect_media_details.cjs --config config.json --courses=全部
@@ -136,7 +159,7 @@ node 01_links/collect_media_details.cjs --config config.json --courses=全部
 选流规则（`selected`）：优先 `voiceStatus==1`（有声音）→ `preferredView` 视角
 → 声道优先级 → 视角顺序（学生/老师/屏幕）→ 文件大小。
 
-### 1.3 导出直链 CSV
+### 1.4 导出直链 CSV
 
 ```bash
 node 01_links/export_fresh_media_urls.cjs --config config.json
@@ -152,7 +175,7 @@ CSV 列：`课程、文件名、上课时间、教师、教室、视角、时长
 
 > 直链 CSV 也是路线 B 的入口：离线下载到网盘、或本地下载后上传网盘，都从这里拿 URL。
 
-### 1.4 直链过期时刷新（rebuild_fresh_manifest.cjs）
+### 1.5 直链过期时刷新（rebuild_fresh_manifest.cjs）
 
 视频直链带签名，一段时间后失效（下载报 401/403）。重新抓取详情即可刷新：
 
@@ -323,7 +346,7 @@ node bin/export-notes.cjs        # ③ 批量生成并导出 AI 笔记（PDF 存
 ## 数据流向
 
 ```
-平台课程目录接口 ──> downloads_by_course/<课程>/video-items.json   （课程列表）
+平台课程目录接口 ──> downloads_by_course/<课程>/video-items.json   （课程列表，collect_course_items.cjs）
         │  collect_media_details.cjs
         ▼
 media_manifests/<课程>/media-manifest.json                        （详情+直链）
