@@ -183,7 +183,7 @@ CSV 列：`课程、文件名、上课时间、教师、教室、视角、时长
 node 01_links/rebuild_fresh_manifest.cjs --config config.json --courses=药物分析 --limit=3
 ```
 
-该脚本必须连 CDP（需登录态打开实录页），成功后回到 1.3 重新导出 CSV。
+该脚本必须连 CDP（需登录态打开实录页），成功后回到 1.4 重新导出 CSV。
 
 ---
 
@@ -300,7 +300,7 @@ python 03_asr/mimo_asr_batch.py --csv media_urls/all_fresh_media_urls.csv --out 
 
 ### 4.1 视频进网盘
 
-- 用阶段 1.3 的直链 CSV（`media_urls/all_fresh_media_urls.csv`）拿全部视频 URL
+- 用阶段 1.4 的直链 CSV（`media_urls/all_fresh_media_urls.csv`）拿全部视频 URL
 - 百度网盘客户端 → 离线下载 → 新建链接任务 → 粘贴 URL 列表
 - 实测平台域名是内网地址（`*.ncu.edu.cn`），**网盘离线下载不保证可用**；
   不可用就换：本地批量下载（`02_download/download_videos.py`）→

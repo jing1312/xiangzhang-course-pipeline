@@ -16,7 +16,7 @@
     "urlsDir": "media_urls",
     "downloadDir": "downloads"
   },
-  "courses": ["药物分析", "生物药剂与药物动力学", "临床药理学"],
+  "courses": ["药物分析", "生物药剂与药物动力学", "临床药理学", "天然药物化学"],
   "preferredView": "studentViewFiles",
   "download": {
     "workers": 3,

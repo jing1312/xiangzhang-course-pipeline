@@ -2,6 +2,8 @@ node_modules/
 config.json
 session/
 downloads/
+downloads_by_course/
+collected-video-items.json
 transcripts/
 media_manifests/
 media_urls/
