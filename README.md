@@ -1,22 +1,34 @@
 # 香樟云课堂课程流水线
 
-把线上教学平台的课程实录批量处理为可下载的视频与转写文本，共四步：
+把线上教学平台的课程实录批量处理为可复习的资料，全程两条路线：
 
-1. **链接提取**：登录平台，抓取每节课的实录详情，导出视频直链 CSV
-2. **下载与整理**：按 CSV 并行下载视频，统一命名，抽取音频
-3. **ASR 转写**：火山引擎豆包（主）/ 小米 MiMo（备选）批量转写为文本
-4. **AI 产出**：把转写文本交给百度网盘 AI 生成 PPT / 讲义 / 笔记
+**路线 A（省空间，主线）：不下载视频，只抽音频转文本**
+平台实录的视频太大（153 节约 13GB），占本地空间。所以不下载视频，
+直接用 ffmpeg 从视频直链里**抽离音频**（16kHz 单声道，一节课不到 100MB），
+再批量 ASR 转成文本，用于复习。
 
-> 第 4 步在独立仓库：**https://github.com/jing1312/baidu-ai-batch**
-> 本流水线 `transcripts/` 的输出可直接作为它的输入。
+**路线 B（要 PPT）：视频进百度网盘，用网盘 AI 批量出课件**
+PPT 很重要，但视频还是不想留在本地——把视频上传到百度网盘（网盘存，
+本地不留），网盘 AI 对每节视频能生成课件 PPT / 讲稿 / 笔记，
+用浏览器自动化（baidu-ai-batch）批量触发、批量导出。
 
 ```
-┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
-│ 01 链接提取   │ → │ 02 下载与整理 │ → │ 03 ASR 转写   │ → │ 04 AI 产出    │
-│ 浏览器CDP     │   │ 并行下载/重命名│   │ 火山豆包(主)   │   │ baidu-ai-    │
-│ +接口签名     │   │ /抽取音频     │   │ MiMo(备选)    │   │ batch 仓库   │
-└──────────────┘   └──────────────┘   └──────────────┘   └──────────────┘
+┌──────────────┐   ┌──────────────┐   ┌──────────────┐
+│ 01 链接提取   │ → │ 02 音频抽取   │ → │ 03 ASR 转写   │
+│ 浏览器CDP     │   │ ffmpeg 从直链 │   │ 火山豆包(主)   │
+│ +接口签名     │   │ 抽音频，不下载│   │ MiMo(备选)    │
+│ → 直链CSV     │   │ 视频         │   │ → 每节txt     │
+└──────────────┘   └──────────────┘   └──────────────┘
+        │
+        ▼ 想要 PPT 时走路线 B
+┌──────────────┐   ┌──────────────┐
+│ 视频上传百度  │ → │ 网盘 AI 批量  │
+│ 网盘(客户端, │   │ 课件/讲稿/笔记 │
+│ 本地不留)     │   │ baidu-ai-batch│
+└──────────────┘   └──────────────┘
 ```
+
+> 路线 B 的自动化工具在独立仓库：**https://github.com/jing1312/baidu-ai-batch**
 
 ---
 
@@ -31,11 +43,10 @@ xiangzhang-course-pipeline/
 │   ├── rebuild_fresh_manifest.cjs  # 直链过期后刷新清单（连 CDP 重新抓）
 │   ├── export_fresh_media_urls.cjs # manifest → all_fresh_media_urls.csv（10 列，带 BOM）
 │   └── build_course_page_urls.cjs  # manifest → 课程实录页面 URL 清单
-├── 02_download/            # 阶段 2：下载与整理
-│   ├── download_videos.py  # 按 CSV 并行下载（3 并发、>1MB 判定成功、断点续传）
-│   ├── rename_videos.py    # 重命名为「简称_序号_课程名_时间.mp4」
-│   ├── add_prefix.py       # 备选：只加「简称_序号_」前缀，保留原名
-│   └── extract_audio.py    # ffmpeg 抽 16kHz 单声道 wav/mp3（带 Referer）
+├── 02_download/            # 阶段 2：音频抽取（主）+ 视频下载（可选）
+│   ├── extract_audio.py    # ★ 从视频直链抽音频（16kHz 单声道），不下载视频
+│   ├── download_videos.py  # 可选：需要本地视频副本时才用（断点续传）
+│   └── rename_videos.py    # 可选：视频改名「简称_序号_课程名_时间.mp4」（上传网盘前）
 └── 03_asr/                 # 阶段 3：转写
     ├── batch_transcribe.py # 主：火山引擎豆包 submit/query 轮询
     └── mimo_asr_batch.py   # 备选：小米 MiMo（7MB/20 分钟自动切片）
@@ -73,20 +84,19 @@ cp config.example.json config.json
 | `platform.teachingApi` | `https://zbkt.ncu.edu.cn/teachingApi` | 后端 API 根地址 |
 | `platform.signKey` | `123123` | 接口签名密钥（与平台协商值一致即可） |
 | `platform.schoolYear` / `term` | `"2025-2026"` / `3` | 学年与学期，拼进实录页 URL |
-| `platform.referer` | portalBase | 下载视频时的 Referer 头 |
+| `platform.referer` | portalBase | 下载/抽音频时的 Referer 头 |
 | `cdp.port` | `9222` | 调试浏览器端口 |
 | `paths.*` | 见下 | 各阶段输入输出目录 |
 | `courses` | `["药物分析", ...]` | 课程名列表（与平台课程目录一致） |
 | `preferredView` | `studentViewFiles` | 优先选的视角（学生/老师/屏幕） |
-| `download.workers` | `3` | 下载并发数 |
-| `download.minSizeBytes` | `1048576` | 判定下载成功的最小字节数 |
+| `download.workers` | `3` | （可选）视频下载并发数 |
+| `download.minSizeBytes` | `1048576` | （可选）判定下载成功的最小字节数 |
 
 `paths` 默认值（在仓库根目录下运行）：
 
 - `courseItemsDir: "downloads_by_course"` — 平台课程目录接口导出的原始数据
 - `manifestsDir: "media_manifests"` — 每节课的详情清单（阶段 1 产物）
 - `urlsDir: "media_urls"` — 导出的直链 CSV（阶段 1 产物）
-- `downloadDir: "downloads"` — 视频下载目录（阶段 2 产物）
 
 ---
 
@@ -139,15 +149,9 @@ node 01_links/export_fresh_media_urls.cjs --config config.json
 
 CSV 列：`课程、文件名、上课时间、教师、教室、视角、时长秒、视频大小MB、课程实录页面URL、视频直链`
 
-### 1.4 生成实录页面 URL 清单（可选）
+> 直链 CSV 也是路线 B 的入口：离线下载到网盘、或本地下载后上传网盘，都从这里拿 URL。
 
-```bash
-node 01_links/build_course_page_urls.cjs --config config.json
-```
-
-输出 `course_page_urls/`，方便在浏览器里逐课打开实录页核对。
-
-### 1.5 直链过期时刷新（rebuild_fresh_manifest.cjs）
+### 1.4 直链过期时刷新（rebuild_fresh_manifest.cjs）
 
 视频直链带签名，一段时间后失效（下载报 401/403）。重新抓取详情即可刷新：
 
@@ -159,56 +163,43 @@ node 01_links/rebuild_fresh_manifest.cjs --config config.json --courses=药物�
 
 ---
 
-## 阶段 2：下载与整理
+## 阶段 2：音频抽取（不下载视频）
 
-### 2.1 下载（download_videos.py）
+### 2.1 抽音频（extract_audio.py，主线）
+
+```bash
+python 02_download/extract_audio.py --config config.json --courses=全部
+```
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `--config` | `config.json` | 配置文件 |
+| `--courses` | 配置里的 courses | 逗号分隔课程名，`全部`=所有课程 |
+| `--limit` | 0（全部） | 每门课只抽前 N 节（调试用） |
+| `--overwrite` | 关 | 覆盖已存在的音频 |
+| `--ffmpeg` | `FFMPEG_PATH` 或 `ffmpeg` | ffmpeg 路径 |
+| `--referer` | config 里的 referer | 抽音频时的 Referer 头（缺失会 403） |
+| `--out` | `transcripts/audio` | 音频输出目录（按课程分文件夹） |
+| `--output-format` | `wav` | `wav`（16kHz 单声道）或 `mp3`（64k） |
+
+行为：直接读 manifest 里的视频直链（`selected.url`）→ ffmpeg 只取音频流
+（`-vn`，16kHz / 单声道），**不下载视频**。已存在且 >1KB 的自动跳过，失败记录
+在 `transcripts/audio/extract-audio-errors.log`。
+
+输出：`transcripts/audio/<课程>/<文件名>.wav`
+
+### 2.2 可选：需要本地视频副本时
+
+路线 A 全程不需要视频文件。只有当你想本地也留一份视频（或改好名再传网盘）时才用：
 
 ```bash
 python 02_download/download_videos.py --csv media_urls/all_fresh_media_urls.csv --out downloads
-```
-
-| 参数 | 默认 | 说明 |
-|------|------|------|
-| `--csv` | `media_urls/all_fresh_media_urls.csv` | 阶段 1 导出的 CSV |
-| `--out` | `downloads` | 输出目录（按课程分文件夹） |
-| `--workers` | `3` | 并行下载数 |
-| `--min-size` | `1048576` | 判定成功的最小字节数 |
-| `--course` | 全部 | 只下载某门课 |
-
-行为：目标文件已存在且大于 `--min-size` 则跳过（断点续传）；失败自动重试 3 次。
-
-### 2.2 重命名
-
-```bash
-# 方案 A：标准命名「简称_序号_课程名_时间.mp4」，序号按上课时间排序
 python 02_download/rename_videos.py --dir downloads \
     --short-names '{"临床药理学":"临床药理","生物药剂与药物动力学":"生物药剂","天然药物化学":"天然药化"}'
-
-# 方案 B：只加前缀「简称_序号_」保留原文件名
-python 02_download/add_prefix.py --dir downloads \
-    --short-names '{"临床药理学":"临床药理"}'
 ```
 
-两个脚本都支持 `--dry-run` 先预览，确认无误再去掉。
-
-### 2.3 抽取音频（extract_audio.py）
-
-```bash
-python 02_download/extract_audio.py --dir downloads --out transcripts/audio --ffmpeg ffmpeg
-```
-
-| 参数 | 默认 | 说明 |
-|------|------|------|
-| `--dir` | 必填 | 视频目录（递归找 mp4/mkv/flv） |
-| `--out` | `transcripts/audio` | WAV 输出目录 |
-| `--ffmpeg` | `FFMPEG_PATH` 或 `ffmpeg` | ffmpeg 路径 |
-| `--referer` | portalBase | 下载时的 Referer 头（缺失会 403） |
-| `--filter` | 全部 | 只处理文件名含该关键词的 |
-| `--limit` | 0（全部） | 只处理前 N 个 |
-| `--overwrite` | 关 | 覆盖已存在的 |
-| `--output-format` | `wav` | `wav`（16kHz 单声道）或 `mp3`（64k） |
-
-> 阶段 3 会自动调用 ffmpeg 抽音频，这步可跳过；单独抽出 wav 便于先人工试听或换别的 ASR。
+`download_videos.py`：3 并发、已存在且 >1MB 则跳过（断点续传）、失败重试 3 次。
+`rename_videos.py`：改成「简称_序号_课程名_时间.mp4」，序号按上课时间排序，`--dry-run` 可预览。
 
 ---
 
@@ -223,22 +214,22 @@ python 02_download/extract_audio.py --dir downloads --out transcripts/audio --ff
 export VOLC_APP_ID=<你的appId>
 export VOLC_ACCESS_TOKEN=<你的token>
 
-python 03_asr/batch_transcribe.py --dir downloads/临床药理学 --out transcripts --ffmpeg ffmpeg
+python 03_asr/batch_transcribe.py --dir transcripts/audio/临床药理学 --out transcripts --ffmpeg ffmpeg
 ```
 
 | 参数 | 默认 | 说明 |
 |------|------|------|
-| `--dir` | 必填 | 视频/音频目录 |
+| `--dir` | 必填 | 音频/视频目录（阶段 2 的 wav 直接可用） |
 | `--out` | `transcripts` | 每节课一个 txt |
 | `--ffmpeg` | `FFMPEG_PATH` 或 `ffmpeg` | ffmpeg 路径 |
-| `--referer` | portalBase | 抽音频时的 Referer |
+| `--referer` | portalBase | 直接传视频时的 Referer |
 | `--filter` | 全部 | 只转写文件名含该关键词的 |
 | `--limit` | 0（全部） | 只转写前 N 个 |
 | `--skip-existing` | 关 | 已有非空 txt 则跳过（断点续传） |
 | `--config` | 无 | 也可从 config.json 的 `asr.volc` 读密钥/ffmpeg 路径 |
 
-内部流程：视频 → ffmpeg 抽 16kHz/单声道/64k mp3 → base64 → `submit` → 轮询 `query`
-（3 秒间隔，最长 30 分钟）→ 文本写入 `<课程>/<文件名>.txt`。
+内部流程：音频 → ffmpeg 转 16kHz/单声道/64k mp3（已是 wav 则直接用）→ base64 →
+`submit` → 轮询 `query`（3 秒间隔，最长 30 分钟）→ 文本写入 `<课程>/<文件名>.txt`。
 
 > 若返回「任务失败」或一直无结果，通常是控制台里开通的产品与代码中
 > `cluster` / `model.app_name` 不一致，按实际开通项调整（见 docs）。
@@ -247,7 +238,7 @@ python 03_asr/batch_transcribe.py --dir downloads/临床药理学 --out transcri
 
 ```bash
 export MIMO_API_KEY=<你的key>
-python 03_asr/mimo_asr_batch.py --dir downloads/临床药理学 --out transcripts_mimo
+python 03_asr/mimo_asr_batch.py --dir transcripts/audio/临床药理学 --out transcripts_mimo
 ```
 
 限制：单次提交音频 ≤7MB 或 ≤20 分钟，超长自动切片后合并结果。
@@ -265,10 +256,37 @@ python 03_asr/mimo_asr_batch.py --dir downloads/临床药理学 --out transcript
 
 ---
 
-## 阶段 4：AI 产出
+## 阶段 4：百度网盘 + 网盘 AI 产出（路线 B）
 
-把 `transcripts/` 里的 txt 交给 [baidu-ai-batch](https://github.com/jing1312/baidu-ai-batch)
-批量生成 PPT / 讲义 / 复习笔记。
+**前提**：视频要进网盘，但不用占本地空间。
+
+### 4.1 视频进网盘
+
+- 用阶段 1.3 的直链 CSV（`media_urls/all_fresh_media_urls.csv`）拿全部视频 URL
+- 百度网盘客户端 → 离线下载 → 新建链接任务 → 粘贴 URL 列表
+- 实测平台域名是内网地址（`*.ncu.edu.cn`），**网盘离线下载不保证可用**；
+  不可用就换：本地批量下载（`02_download/download_videos.py`）→
+  改名（`rename_videos.py`）→ 网盘客户端拖拽上传 → **传完本地删掉**，
+  视频只在网盘里
+- 传完记得清理网盘里重复的原始名文件，只留「简称_序号_课程名_时间.mp4」
+
+### 4.2 网盘 AI 批量产出（baidu-ai-batch）
+
+网盘 AI 对每节视频的课件 / 讲稿 / 笔记是**按需生成**的：要挨个打开视频 →
+切到「课件/文稿/笔记」标签 → 触发 AI 生成 → 等服务端跑完 → 再导出。
+153 节手动点要一整天。
+
+用 [baidu-ai-batch](https://github.com/jing1312/baidu-ai-batch) 自动化：
+
+```bash
+# 在 baidu-ai-batch 仓库里：
+node bin/export-ppt.cjs          # ① 批量导出 AI 课件 PPT（存回网盘视频目录）
+node bin/extract-manuscript.cjs  # ② 批量提取 AI 讲稿 → 本地 TXT
+node bin/export-notes.cjs        # ③ 批量生成并导出 AI 笔记（PDF 存网盘 + 本地 TXT）
+```
+
+实际战果（原会话）：4 门课 153 节视频，自动导出 **146 份 AI 课件 PPT、
+122 份讲稿、55+ 份笔记**，全程无人值守。
 
 ---
 
@@ -276,12 +294,14 @@ python 03_asr/mimo_asr_batch.py --dir downloads/临床药理学 --out transcript
 
 | 现象 | 处理 |
 |------|------|
-| 下载报 401/403 | 直链过期，跑 `rebuild_fresh_manifest.cjs` 后重新导出 CSV |
+| 抽音频/下载报 401/403 | 直链过期，跑 `rebuild_fresh_manifest.cjs` 后重新导出 CSV |
 | CDP 连不上 | 确认 Edge 以 `--remote-debugging-port=9222` 启动；浏览器页面保持打开 |
 | 页面提示未登录 | 在调试浏览器里重新登录平台 |
 | `validCode` 不匹配 | 确认 `config.json` 的 `signKey` 与平台一致 |
 | ASR 任务失败/无结果 | 控制台开通的产品与 `cluster`/`model.app_name` 不符，按 docs 调整 |
 | ffmpeg 找不到 | 把 ffmpeg 加入 PATH，或设 `FFMPEG_PATH` 指向可执行文件 |
+| 网盘离线下载链接无效 | 平台 URL 是内网地址，改走「本地下载 → 上传网盘 → 本地删」 |
+| 网盘里文件重复 | 下载/上传两次会产生原始名+改名两套文件，手动删原始名那套 |
 
 ---
 
@@ -294,11 +314,10 @@ python 03_asr/mimo_asr_batch.py --dir downloads/临床药理学 --out transcript
 media_manifests/<课程>/media-manifest.json                        （详情+直链）
         │  export_fresh_media_urls.cjs
         ▼
-media_urls/all_fresh_media_urls.csv   ──> download_videos.py ──> downloads/<课程>/*.mp4
-                                                                    │  rename_videos.py
-                                                                    ▼
-                                                               downloads/<课程>/简称_序号_*.mp4
-                                                                    │  extract_audio.py / batch_transcribe.py 内置抽取
-                                                                    ▼
-                                                               transcripts/<课程>/*.txt  ──> baidu-ai-batch
+media_urls/all_fresh_media_urls.csv
+        │                                   ┌─ 路线 B：离线下载/本地下载 ─> 百度网盘
+        │  extract_audio.py（ffmpeg 从直链  │        │  baidu-ai-batch
+        ▼  只取音频流，不下载视频）          ▼        ▼
+transcripts/audio/<课程>/*.wav  ──> 03_asr ──> transcripts/*.txt（复习用）
+                                            └─ 网盘 AI 课件/讲稿/笔记（在网盘侧）
 ```
