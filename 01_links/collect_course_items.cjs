@@ -82,12 +82,15 @@ function devtoolsWsUrl(cfg) {
 
 function aiClassroomUrl(cfg, item) {
   const url = new URL(cfg.platform.portalBase);
+  const startTime = String(item.startTime || '');
+  const monthMatch = startTime.match(/^\d{4}-(\d{1,2})-/);
+  const month = monthMatch ? monthMatch[1] : String(item.month || item.mouth || '');
   const params = new URLSearchParams({
     videoId: item.id,
     courseTableId: item.courseTableId,
     schoolYear: item.schoolYear || cfg.platform.schoolYear || '2025-2026',
     term: String(item.term ?? cfg.platform.term ?? 3),
-    mouth: String(item.week ?? ''),
+    mouth: month,
     latestWatchTime: '0',
   });
   url.hash = `#/aiClassroom/aiClassroom.htm?${params.toString()}`;
