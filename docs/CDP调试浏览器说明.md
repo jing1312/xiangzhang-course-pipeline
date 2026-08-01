@@ -14,7 +14,7 @@ msedge --remote-debugging-port=9222 --user-data-dir=C:\edge-debug-profile
 
 ## 脚本如何连上
 
-- `collect_media_details.cjs`：默认 `launchPersistentContext` 以无头 Edge 打开 portalBase 首页，
+- `collect_course_items.cjs`（课程列表采集）、`collect_media_details.cjs`：默认 `launchPersistentContext` 以无头 Edge 打开 portalBase 首页，
   若配置了 `cdp.port`（或传 `--cdp`）则改连已打开的调试端口，直接复用登录态。
 - `rebuild_fresh_manifest.cjs`：必须 `--cdp`（需要带登录态打开实录页）。
 - 端口：`config.json` → `cdp.port`（默认 9222）。
@@ -23,3 +23,4 @@ msedge --remote-debugging-port=9222 --user-data-dir=C:\edge-debug-profile
 
 不传 `--cdp` 时脚本尝试无头打开首页。若平台强制登录校验（如滑块验证），
 仍建议走 CDP 方案。
+

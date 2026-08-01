@@ -48,10 +48,14 @@ xiangzhang-course-pipeline/
 │   ├── extract_audio.py    # ★ 从视频直链抽音频（16kHz 单声道），不下载视频
 │   ├── download_videos.py  # 可选：需要本地视频副本时才用（断点续传）
 │   ├── rename_videos.py    # 可选：第一遍改名，文件ID -> 课程名_时间.mp4
-│   └── rename_final.py     # 可选：第二遍改名，-> 简称_序号_课程名_时间.mp4（传网盘前用）
-└── 03_asr/                 # 阶段 3：转写
-    ├── batch_transcribe.py # 主：火山引擎豆包 submit/query 轮询
-    └── mimo_asr_batch.py   # 备选：小米 MiMo（7MB/20 分钟自动切片）
+│   ├── rename_final.py     # 可选：第二遍改名，-> 简称_序号_课程名_时间.mp4（传网盘前用）
+│   └── add_prefix.py       # 可选：不改名，只给原文件加 简称_序号_ 前缀
+├── 03_asr/                 # 阶段 3：转写
+│   ├── batch_transcribe.py # 主：火山引擎豆包 submit/query 轮询
+│   └── mimo_asr_batch.py   # 备选：小米 MiMo（7MB/20 分钟自动切片）
+└── docs/                   # 说明文档
+    ├── ASR-方案对比与踩坑.md
+    └── CDP调试浏览器说明.md
 ```
 
 ---
@@ -114,6 +118,7 @@ msedge --remote-debugging-port=9222 --user-data-dir=%LOCALAPPDATA%\edge-debug-pr
 ```
 
 在打开的浏览器里登录教学平台（建议勾选「记住我」），之后保持浏览器开着。
+详见 [docs/CDP调试浏览器说明.md](docs/CDP调试浏览器说明.md)。
 
 ### 1.2 采集课程列表（collect_course_items.cjs）
 
@@ -227,6 +232,10 @@ python 02_download/rename_videos.py --dir downloads --csv media_urls/all_fresh_m
 # ③ 第二遍：-> 简称_序号_课程名_上课时间.mp4（序号按上课时间排序，传网盘前用这套）
 python 02_download/rename_final.py --dir downloads \
     --short-names '{"临床药理学":"临床药理","生物药剂与药物动力学":"生物药剂","天然药物化学":"天然药化"}'
+
+# 备选：不想改名，只给原文件加 简称_序号_ 前缀
+python 02_download/add_prefix.py --dir downloads \
+    --short-names '{"临床药理学":"临床药理","生物药剂与药物动力学":"生物药剂"}'
 ```
 
 两个改名脚本都支持 `--dry-run` 先预览。
