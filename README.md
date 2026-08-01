@@ -46,7 +46,8 @@ xiangzhang-course-pipeline/
 ├── 02_download/            # 阶段 2：音频抽取（主）+ 视频下载（可选）
 │   ├── extract_audio.py    # ★ 从视频直链抽音频（16kHz 单声道），不下载视频
 │   ├── download_videos.py  # 可选：需要本地视频副本时才用（断点续传）
-│   └── rename_videos.py    # 可选：视频改名「简称_序号_课程名_时间.mp4」（上传网盘前）
+│   ├── rename_videos.py    # 可选：第一遍改名，文件ID -> 课程名_时间.mp4
+│   └── rename_final.py     # 可选：第二遍改名，-> 简称_序号_课程名_时间.mp4（传网盘前用）
 └── 03_asr/                 # 阶段 3：转写
     ├── batch_transcribe.py # 主：火山引擎豆包 submit/query 轮询
     └── mimo_asr_batch.py   # 备选：小米 MiMo（7MB/20 分钟自动切片）
@@ -190,16 +191,22 @@ python 02_download/extract_audio.py --config config.json --courses=全部
 
 ### 2.2 可选：需要本地视频副本时
 
-路线 A 全程不需要视频文件。只有当你想本地也留一份视频（或改好名再传网盘）时才用：
+路线 A 全程不需要视频文件。只有当你想本地也留一份视频（或改好名再传网盘）时才用。
+下载的文件名是平台文件 ID，需要**两步重命名**：
 
 ```bash
+# ① 下载（3 并发、已存在且 >1MB 则跳过、失败重试 3 次）
 python 02_download/download_videos.py --csv media_urls/all_fresh_media_urls.csv --out downloads
-python 02_download/rename_videos.py --dir downloads \
+
+# ② 第一遍：文件ID（ff80...）-> 课程名_上课时间.mp4（从直链 CSV 提取映射）
+python 02_download/rename_videos.py --dir downloads --csv media_urls/all_fresh_media_urls.csv
+
+# ③ 第二遍：-> 简称_序号_课程名_上课时间.mp4（序号按上课时间排序，传网盘前用这套）
+python 02_download/rename_final.py --dir downloads \
     --short-names '{"临床药理学":"临床药理","生物药剂与药物动力学":"生物药剂","天然药物化学":"天然药化"}'
 ```
 
-`download_videos.py`：3 并发、已存在且 >1MB 则跳过（断点续传）、失败重试 3 次。
-`rename_videos.py`：改成「简称_序号_课程名_时间.mp4」，序号按上课时间排序，`--dry-run` 可预览。
+两个改名脚本都支持 `--dry-run` 先预览。
 
 ---
 
@@ -207,29 +214,35 @@ python 02_download/rename_videos.py --dir downloads \
 
 ### 3.1 主方案：火山引擎豆包（batch_transcribe.py）
 
-开通[火山引擎语音技术-大模型语音识别](https://www.volcengine.com/docs/6561/152289)后，
-在控制台拿 `AppID` 和 `Access Token`，通过环境变量注入（不落盘）：
+开通[火山引擎-大模型录音文件识别](https://www.volcengine.com/docs/6561/152289)后，
+在控制台拿 `APP ID` 和 `Access Token`，通过环境变量注入（不落盘）：
 
 ```bash
 export VOLC_APP_ID=<你的appId>
 export VOLC_ACCESS_TOKEN=<你的token>
 
-python 03_asr/batch_transcribe.py --dir transcripts/audio/临床药理学 --out transcripts --ffmpeg ffmpeg
+# 方式 A：直接吃阶段1的直链 CSV（ffmpeg 现场抽音频，原版流程）
+python 03_asr/batch_transcribe.py --csv media_urls/all_fresh_media_urls.csv --out transcripts
+
+# 方式 B：吃阶段2抽好的本地音频
+python 03_asr/batch_transcribe.py --dir transcripts/audio/临床药理学 --out transcripts
 ```
 
 | 参数 | 默认 | 说明 |
 |------|------|------|
-| `--dir` | 必填 | 音频/视频目录（阶段 2 的 wav 直接可用） |
-| `--out` | `transcripts` | 每节课一个 txt |
+| `--csv` | 无 | 直链 CSV（`media_urls/all_fresh_media_urls.csv`），与 `--dir` 二选一 |
+| `--dir` | 无 | 本地音频/视频目录（阶段 2 的 wav 直接可用） |
+| `--out` | `transcripts` | 每节课一个 txt（按课程分文件夹） |
 | `--ffmpeg` | `FFMPEG_PATH` 或 `ffmpeg` | ffmpeg 路径 |
-| `--referer` | portalBase | 直接传视频时的 Referer |
-| `--filter` | 全部 | 只转写文件名含该关键词的 |
+| `--referer` | portalBase | 从直链抽音频时的 Referer |
+| `--filter` | 全部 | 只转写文件名/课程名含该关键词的 |
 | `--limit` | 0（全部） | 只转写前 N 个 |
 | `--skip-existing` | 关 | 已有非空 txt 则跳过（断点续传） |
 | `--config` | 无 | 也可从 config.json 的 `asr.volc` 读密钥/ffmpeg 路径 |
 
 内部流程：音频 → ffmpeg 转 16kHz/单声道/64k mp3（已是 wav 则直接用）→ base64 →
-`submit` → 轮询 `query`（3 秒间隔，最长 30 分钟）→ 文本写入 `<课程>/<文件名>.txt`。
+`submit`（Header 认证，`X-Api-Resource-Id: volc.seedasr.auc`）→ 轮询 `query`
+（5 秒间隔，最长 10 分钟）→ 文本 + 分句详情写入 `<课程>/<文件名>.txt`。
 
 > 若返回「任务失败」或一直无结果，通常是控制台里开通的产品与代码中
 > `cluster` / `model.app_name` 不一致，按实际开通项调整（见 docs）。
@@ -238,10 +251,12 @@ python 03_asr/batch_transcribe.py --dir transcripts/audio/临床药理学 --out 
 
 ```bash
 export MIMO_API_KEY=<你的key>
-python 03_asr/mimo_asr_batch.py --dir transcripts/audio/临床药理学 --out transcripts_mimo
+python 03_asr/mimo_asr_batch.py --csv media_urls/all_fresh_media_urls.csv --out transcripts_mimo
+# 或吃本地音频：--dir transcripts/audio/临床药理学
 ```
 
-限制：单次提交音频 ≤7MB 或 ≤20 分钟，超长自动切片后合并结果。
+限制：单次提交音频 ≤7MB 或 ≤20 分钟，超长自动切片（16kbps 压缩）后合并结果；
+自带静音课检测（音量过低直接跳过）。
 
 ### 3.3 方案对比
 
@@ -298,7 +313,7 @@ node bin/export-notes.cjs        # ③ 批量生成并导出 AI 笔记（PDF 存
 | CDP 连不上 | 确认 Edge 以 `--remote-debugging-port=9222` 启动；浏览器页面保持打开 |
 | 页面提示未登录 | 在调试浏览器里重新登录平台 |
 | `validCode` 不匹配 | 确认 `config.json` 的 `signKey` 与平台一致 |
-| ASR 任务失败/无结果 | 控制台开通的产品与 `cluster`/`model.app_name` 不符，按 docs 调整 |
+| ASR 任务失败/无结果 | 检查密钥与资源 ID（`volc.seedasr.auc`）；任务状态码在响应 Header `X-Api-Status-Code`，非 `20000000` 看 `X-Api-Message` |
 | ffmpeg 找不到 | 把 ffmpeg 加入 PATH，或设 `FFMPEG_PATH` 指向可执行文件 |
 | 网盘离线下载链接无效 | 平台 URL 是内网地址，改走「本地下载 → 上传网盘 → 本地删」 |
 | 网盘里文件重复 | 下载/上传两次会产生原始名+改名两套文件，手动删原始名那套 |

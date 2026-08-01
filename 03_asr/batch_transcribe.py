@@ -2,45 +2,55 @@
 """
 03_asr/batch_transcribe.py
 
-火山引擎（豆包）大模型语音识别（AUC BigModel ASR）批量转写。
+火山引擎「大模型录音文件识别」（豆包录音文件识别模型2.0）批量转写。
 
-流程：视频/音频 -> ffmpeg 抽取 16kHz 单声道 64kbps mp3 -> base64 上传
-      -> /submit 提交 -> /query 轮询 -> 结果保存为 txt。
+- 认证走 Header：X-Api-App-Key / X-Api-Access-Key / X-Api-Resource-Id: volc.seedasr.auc
+- 音频以 base64 内嵌提交（单文件 ≤512MB，无时长限制），也可直接传视频 URL
+- 任务状态码在响应 Header X-Api-Status-Code：20000000=成功，20000001/20000002=处理中
 
-密钥从环境变量读取（VOCL_APP_ID / VOLC_ACCESS_TOKEN），
-也可在 config.json 的 asr.volc 字段中提供（不推荐提交进仓库）。
+密钥从环境变量读取（VOLC_APP_ID / VOLC_ACCESS_TOKEN），不落盘。
 
 用法：
-    export VOLC_APP_ID=<你的火山引擎appId>
-    export VOLC_ACCESS_TOKEN=<你的访问token>
-    python batch_transcribe.py --dir downloads/临床药理学 --out transcripts \
-        --ffmpeg ffmpeg --referer "https://zbkt.ncu.edu.cn/TeachingCenterStudentWeb/index.html"
+    export VOLC_APP_ID=<你的火山appId>
+    export VOLC_ACCESS_TOKEN=<你的accessToken>
+
+    # 方式 A：直接吃阶段1的直链 CSV（原版流程，ffmpeg 现场抽音频）
+    python batch_transcribe.py --csv media_urls/all_fresh_media_urls.csv --out transcripts
+
+    # 方式 B：吃阶段2抽好的本地音频（wav/mp3 目录）
+    python batch_transcribe.py --dir transcripts/audio/临床药理学 --out transcripts
 """
 import argparse
 import base64
+import csv
 import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
+import uuid
+from datetime import datetime
 
 import requests
 
 SUBMIT_URL = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/submit"
 QUERY_URL = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/query"
-SAMPLE_RATE = 16000
-MAX_AUDIO_SECONDS = 600  # 单次提交最长 10 分钟，更长的视频先切片（外部切好或按节提交）
+RESOURCE_ID = "volc.seedasr.auc"
+OK = "20000000"
+RUNNING = {"20000001", "20000002"}
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="火山引擎豆包 ASR 批量转写")
-    parser.add_argument("--dir", required=True, help="视频/音频所在目录")
+    parser = argparse.ArgumentParser(description="火山引擎大模型录音文件识别批量转写")
+    parser.add_argument("--csv", default=None, help="直链 CSV（media_urls/all_fresh_media_urls.csv），与 --dir 二选一")
+    parser.add_argument("--dir", default=None, help="本地音频/视频目录，与 --csv 二选一")
     parser.add_argument("--out", default="transcripts", help="转写文本输出目录")
     parser.add_argument("--ffmpeg", default=os.environ.get("FFMPEG_PATH", "ffmpeg"), help="ffmpeg 可执行文件路径")
-    parser.add_argument("--referer", default="https://zbkt.ncu.edu.cn/TeachingCenterStudentWeb/index.html", help="下载 Referer 头")
-    parser.add_argument("--filter", default=None, help="只处理文件名包含该关键词的文件")
-    parser.add_argument("--limit", type=int, default=0, help="最多处理 N 个文件（0=全部）")
-    parser.add_argument("--skip-existing", action="store_true", help="已存在 txt 则跳过")
+    parser.add_argument("--referer", default="https://zbkt.ncu.edu.cn/TeachingCenterStudentWeb/index.html", help="从直链抽音频时的 Referer")
+    parser.add_argument("--filter", default=None, help="只处理文件名含该关键词的")
+    parser.add_argument("--limit", type=int, default=0, help="最多处理 N 节（0=全部）")
+    parser.add_argument("--skip-existing", action="store_true", help="已有非空 txt 则跳过（断点续传）")
     parser.add_argument("--config", default=None, help="config.json 路径（读取 asr.volc / asr.ffmpegPath）")
     return parser.parse_args()
 
@@ -49,6 +59,7 @@ def load_secrets(args):
     app_id = os.environ.get("VOLC_APP_ID")
     access_token = os.environ.get("VOLC_ACCESS_TOKEN")
     ffmpeg = args.ffmpeg
+    referer = args.referer
     if args.config and os.path.exists(args.config):
         with open(args.config, "r", encoding="utf-8") as f:
             cfg = json.load(f)
@@ -56,117 +67,201 @@ def load_secrets(args):
         app_id = app_id or volc.get("appId")
         access_token = access_token or volc.get("accessToken")
         ffmpeg = ffmpeg or cfg.get("asr", {}).get("ffmpegPath")
+        referer = cfg.get("platform", {}).get("referer", referer)
     if not app_id or not access_token:
         sys.exit("缺少火山引擎密钥，请设置环境变量 VOLC_APP_ID / VOLC_ACCESS_TOKEN")
-    return app_id, access_token, ffmpeg
+    return app_id, access_token, ffmpeg, referer
 
 
-def extract_audio(video_path, tmp_mp3, ffmpeg, referer):
-    cmd = [
-        ffmpeg, "-y", "-headers", f"Referer: {referer}\r\n",
-        "-i", video_path, "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE),
-        "-b:a", "64k", tmp_mp3,
-    ]
-    result = subprocess.run(cmd, capture_output=True, timeout=1800)
-    if result.returncode != 0 or not os.path.exists(tmp_mp3):
-        raise RuntimeError(result.stderr.decode("utf-8", "ignore")[-500:])
+def extract_audio_base64(ffmpeg, media_path, referer, max_retries=3):
+    """从视频 URL 或本地文件抽 16kHz 单声道 64k mp3，返回 (base64, 字节数)。"""
+    for attempt in range(max_retries):
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+            tmp_path = tmp.name
+        try:
+            cmd = [
+                ffmpeg, "-y", "-loglevel", "error",
+                "-headers", f"Referer: {referer}\r\n",
+                "-i", media_path,
+                "-vn", "-acodec", "libmp3lame", "-ar", "16000", "-ac", "1", "-b:a", "64k",
+                tmp_path,
+            ]
+            result = subprocess.run(cmd, capture_output=True, timeout=1200)
+            if result.returncode != 0 or not os.path.exists(tmp_path):
+                if attempt < max_retries - 1:
+                    time.sleep(10)
+                    continue
+                return None, 0
+            with open(tmp_path, "rb") as f:
+                return base64.b64encode(f.read()).decode("utf-8"), os.path.getsize(tmp_path)
+        except subprocess.TimeoutExpired:
+            if attempt < max_retries - 1:
+                time.sleep(10)
+                continue
+            return None, 0
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+    return None, 0
 
 
-def submit_audio(app_id, access_token, audio_path):
-    with open(audio_path, "rb") as f:
-        audio_data = base64.b64encode(f.read()).decode("ascii")
-    payload = {
-        "app": {"appid": app_id, "token": access_token, "cluster": "volcengine_streaming_common"},
-        "user": {"uid": "batch_transcribe"},
-        "request": {
-            "reqid": f"req_{int(time.time() * 1000)}",
-            "workflow": "audio_in,resample,partition,vad,fe,decode,itn,nlu_punctuate",
-            "res_type": "result",
-            "audio": {"format": "mp3", "sample_rate": SAMPLE_RATE, "bits": 16, "channel": 1},
-            "model": {"app_name": "bigmodel_tts_v2"},
-        },
-        "audio_data": audio_data,
+def submit_task(app_id, access_token, audio_base64):
+    task_id = str(uuid.uuid4())
+    headers = {
+        "Content-Type": "application/json",
+        "X-Api-App-Key": app_id,
+        "X-Api-Access-Key": access_token,
+        "X-Api-Resource-Id": RESOURCE_ID,
+        "X-Api-Request-Id": task_id,
+        "X-Api-Sequence": "-1",
     }
-    resp = requests.post(SUBMIT_URL, json=payload, timeout=120)
-    resp.raise_for_status()
-    data = resp.json()
-    if data.get("code") != 0:
-        raise RuntimeError(f"submit 失败: {data.get('code')} {data.get('message')}")
-    return data["data"]["id"]
-
-
-def query_result(app_id, access_token, submit_id, timeout=1800):
-    payload = {
-        "app": {"appid": app_id, "token": access_token, "cluster": "volcengine_streaming_common"},
-        "request": {"reqid": f"req_{int(time.time() * 1000)}", "id": submit_id},
+    data = {
+        "user": {"uid": "course"},
+        "audio": {"format": "mp3", "url": "", "data": audio_base64},
+        "request": {"model_name": "bigmodel", "enable_itn": True, "enable_punc": True, "show_utterances": True},
     }
-    start = time.time()
-    while time.time() - start < timeout:
-        resp = requests.post(QUERY_URL, json=payload, timeout=60)
-        resp.raise_for_status()
-        data = resp.json()
-        status = data.get("data", {}).get("status")
-        if status == 2:
-            result = data["data"].get("result") or data.get("result") or ""
-            if isinstance(result, str):
-                return result
-            if isinstance(result, dict):
-                return result.get("text", "")
-            return json.dumps(result, ensure_ascii=False)
-        if status == 3:
-            raise RuntimeError(f"任务失败: {data.get('message')}")
-        time.sleep(3)
-    raise TimeoutError("查询超时")
+    r = requests.post(SUBMIT_URL, headers=headers, json=data, timeout=120)
+    return {
+        "task_id": task_id,
+        "status_code": r.headers.get("X-Api-Status-Code"),
+        "message": r.headers.get("X-Api-Message"),
+    }
+
+
+def query_task(app_id, access_token, task_id):
+    headers = {
+        "Content-Type": "application/json",
+        "X-Api-App-Key": app_id,
+        "X-Api-Access-Key": access_token,
+        "X-Api-Resource-Id": RESOURCE_ID,
+        "X-Api-Request-Id": task_id,
+    }
+    r = requests.post(QUERY_URL, headers=headers, json={}, timeout=30)
+    result = None
+    if r.text:
+        try:
+            result = r.json()
+        except Exception:
+            pass
+    return {"status_code": r.headers.get("X-Api-Status-Code"), "result": result}
+
+
+def wait_for_result(app_id, access_token, task_id, max_wait=600):
+    for _ in range(max_wait // 5):
+        time.sleep(5)
+        qr = query_task(app_id, access_token, task_id)
+        sc = qr["status_code"]
+        if sc == OK:
+            return qr
+        if sc not in RUNNING:
+            return None
+    return None
+
+
+def load_from_csv(csv_path, course_filter, limit):
+    items = []
+    with open(csv_path, "r", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        keys = list(reader.fieldnames)
+        for row in reader:
+            if course_filter and row[keys[0]] != course_filter:
+                continue
+            items.append({
+                "course": row[keys[0]],
+                "filename": row[keys[1]],
+                "duration": row[keys[6]],
+                "media": row[keys[-1]],
+            })
+    if limit > 0:
+        items = items[:limit]
+    return items
+
+
+def load_from_dir(dir_path, file_filter, limit):
+    items = []
+    for f in sorted(os.listdir(dir_path)):
+        if not f.lower().endswith((".wav", ".mp3", ".mp4", ".mkv", ".flv")):
+            continue
+        if file_filter and file_filter not in f:
+            continue
+        items.append({"course": os.path.basename(dir_path), "filename": os.path.splitext(f)[0], "duration": "", "media": os.path.join(dir_path, f)})
+    if limit > 0:
+        items = items[:limit]
+    return items
+
+
+def process_one(app_id, access_token, ffmpeg, referer, item, out_dir, args, index, total):
+    filename = item["filename"]
+    output_path = os.path.join(out_dir, f"{filename}.txt")
+    if args.skip_existing and os.path.exists(output_path) and os.path.getsize(output_path) > 100:
+        print(f"[{index}/{total}] 已存在，跳过: {filename[:30]}")
+        return True
+
+    duration = item.get("duration") or ""
+    print(f"[{index}/{total}] {filename[:30]}... ({int(duration) // 60 if str(duration).isdigit() else '?'}分钟)")
+
+    audio_base64, audio_size = extract_audio_base64(ffmpeg, item["media"], referer)
+    if not audio_base64:
+        print("  音频提取失败")
+        return False
+    print(f"  音频: {audio_size / 1024 / 1024:.1f}MB")
+
+    result = submit_task(app_id, access_token, audio_base64)
+    if result["status_code"] != OK:
+        print(f"  提交失败: {result['message']}")
+        return False
+
+    task_id = result["task_id"]
+    print(f"  任务: {task_id[:8]}...")
+
+    qr = wait_for_result(app_id, access_token, task_id)
+    if not qr:
+        print("  转写失败/超时")
+        return False
+
+    rd = qr.get("result", {}).get("result", {})
+    text = rd.get("text", "")
+    utterances = rd.get("utterances", [])
+    if not text:
+        print("  结果为空")
+        return False
+
+    os.makedirs(out_dir, exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(f"# {filename}\n# 课程: {item['course']}\n# 转写时间: {datetime.now()}\n\n{text}")
+        if utterances:
+            f.write("\n\n--- 分句详情 ---\n")
+            for u in utterances:
+                f.write(f"[{u.get('start_time', 0) / 1000:.1f}s - {u.get('end_time', 0) / 1000:.1f}s] {u.get('text', '')}\n")
+    print(f"  完成: {len(text)}字")
+    return True
 
 
 def main():
     args = parse_args()
-    app_id, access_token, ffmpeg = load_secrets(args)
+    if not args.csv and not args.dir:
+        sys.exit("需要 --csv 或 --dir")
+    app_id, access_token, ffmpeg, referer = load_secrets(args)
 
-    files = [
-        os.path.join(args.dir, f)
-        for f in sorted(os.listdir(args.dir))
-        if f.lower().endswith((".mp4", ".mkv", ".flv", ".wav", ".mp3"))
-        and (args.filter is None or args.filter in f)
-    ]
-    if args.limit > 0:
-        files = files[: args.limit]
-    print(f"共 {len(files)} 个文件待转写")
+    if args.csv:
+        items = load_from_csv(args.csv, args.filter, args.limit)
+    else:
+        items = load_from_dir(args.dir, args.filter, args.limit)
+    print(f"共 {len(items)} 节待转写")
 
-    os.makedirs(args.out, exist_ok=True)
-    tmp_dir = os.path.join(args.out, "_tmp")
-    os.makedirs(tmp_dir, exist_ok=True)
+    courses = {}
+    for item in items:
+        courses.setdefault(item["course"], []).append(item)
+    print(f"课程: {', '.join(courses.keys()) or '-'}")
 
     success = failed = 0
-    for i, file_path in enumerate(files, 1):
-        name = os.path.splitext(os.path.basename(file_path))[0]
-        txt_path = os.path.join(args.out, name + ".txt")
-        if args.skip_existing and os.path.exists(txt_path) and os.path.getsize(txt_path) > 0:
-            print(f"[{i}/{len(files)}] 跳过（已存在）: {name}")
-            continue
-
-        tmp_mp3 = os.path.join(tmp_dir, name + ".mp3")
-        try:
-            if not file_path.lower().endswith((".mp3", ".wav")):
-                print(f"[{i}/{len(files)}] 抽取音频: {name}")
-                extract_audio(file_path, tmp_mp3, ffmpeg, args.referer)
-                audio_path = tmp_mp3
-            else:
-                audio_path = file_path
-
-            print(f"[{i}/{len(files)}] 提交转写: {name}")
-            submit_id = submit_audio(app_id, access_token, audio_path)
-            text = query_result(app_id, access_token, submit_id)
-            with open(txt_path, "w", encoding="utf-8") as f:
-                f.write(text)
-            print(f"  完成，{len(text)} 字 -> {txt_path}")
+    for index, item in enumerate(items, 1):
+        out_dir = os.path.join(args.out, item["course"])
+        if process_one(app_id, access_token, ffmpeg, referer, item, out_dir, args, index, len(items)):
             success += 1
-        except Exception as e:
+        else:
             failed += 1
-            print(f"  失败: {e}")
-        finally:
-            if os.path.exists(tmp_mp3):
-                os.remove(tmp_mp3)
+        time.sleep(2)
 
     print(f"\n完成! 成功: {success}, 失败: {failed}")
     print(f"输出目录: {args.out}")

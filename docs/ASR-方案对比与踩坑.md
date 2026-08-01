@@ -14,14 +14,27 @@
 
 ## 火山引擎豆包要点
 
+- 服务：**大模型录音文件识别**（豆包录音文件识别模型2.0），资源 ID `volc.seedasr.auc`
 - 接口：
   - 提交 `POST https://openspeech.bytedance.com/api/v3/auc/bigmodel/submit`
-  - 查询 `POST https://openspeech.bytedance.com/api/v3/auc/bigmodel/query`（轮询，3s 间隔）
-- 请求体关键字段：`app.{appid,token,cluster}`、`request.{reqid,audio{format,sample_rate,bits,channel},model{app_name}}`、`audio_data`（base64）
-- 音频参数：**16kHz / 单声道 / 64kbps mp3**（ffmpeg 转码）
-- `cluster` 用 `volcengine_streaming_common`；模型 `app_name` 按控制台开通的产品调整
-- 查询响应：`status==2` 表示完成（结果在 `data.result`），`status==3` 表示失败
+  - 查询 `POST https://openspeech.bytedance.com/api/v3/auc/bigmodel/query`（轮询 5s 间隔）
+- 认证走 **Header**（不是 body）：
+  `X-Api-App-Key`（APP ID）、`X-Api-Access-Key`（Access Token）、
+  `X-Api-Resource-Id: volc.seedasr.auc`、`X-Api-Request-Id: <uuid>`、`X-Api-Sequence: -1`
+- Body：`user.{uid}`、`audio.{format: "mp3", url, data}`（**base64 直传**，
+  单文件 ≤512MB、无时长限制）、`request.{model_name: "bigmodel", enable_itn, enable_punc, show_utterances}`
+- **任务状态码在响应 Header `X-Api-Status-Code`**：`20000000`=成功，
+  `20000001/20000002`=处理中，其他=失败（`X-Api-Message` 带原因）
+- 音频参数：**16kHz / 单声道 / 64kbps mp3**（ffmpeg 转码后 base64）
+- 结果：`result.result.text` + `utterances`（分句，时间戳单位毫秒）
 - 官方文档：https://www.volcengine.com/docs/6561/152289
+
+## MiMo 要点（备选）
+
+- OpenAI 兼容接口：`https://token-plan-cn.xiaomimimo.com/v1/chat/completions`，模型 `mimo-v2.5-asr`
+- 认证：Header `api-key`；音频走 `messages[].content` 里的 `input_audio`（`data:audio/mpeg;base64,...`）
+- 加 `asr_options: {"language": "zh"}`
+- 限制：单次 ≤7MB 或 ≤20 分钟，超长 ffmpeg segment 切片；音频压到 16kbps
 
 ## 讯飞踩坑（避免重蹈）
 
