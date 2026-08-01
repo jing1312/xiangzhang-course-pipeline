@@ -1,0 +1,13 @@
+node_modules/
+config.json
+session/
+downloads/
+transcripts/
+media_manifests/
+media_urls/
+*.wav
+*.mp3
+*.mp4
+*.log
+*.rar
+.DS_Store
